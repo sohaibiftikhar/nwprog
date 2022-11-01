@@ -1,26 +1,29 @@
-Compiler = /usr/local/opt/llvm/bin/clang++
-IncludeDir = /usr/local/opt/llvm/include
-LinkDir = /usr/local/opt/llvm/lib
+LLVMHome = /home/linuxbrew/.linuxbrew/Cellar/llvm/15.0.3
+Compiler = $(LLVMHome)/bin/clang++
+IncludeDir = $(LLVMHome)/include
+LinkDir = $(LLVMHome)/lib
 CompilerFlags := -Wall -ggdb -Werror -std=c++20 -I$(IncludeDir) -L$(LinkDir)
 
-Poll := nw_poll
-Select := nw_select
-EPoll := nw_epoll
-URing := nw_ring
+client := client/main
+server := server/main
+programs := $(client) $(server)
+srcs := $(addprefix src/, $(programs))
+outs := $(addprefix bin/, $(programs))
 
-all: $(Poll) $(Select) $(EPoll) $(URing)
+bin/%: src/%.cc
+	mkdir -p `dirname $(@)`
+	$(Compiler) $(CompilerFlags) -o $(@) $<
 
-$(Poll): %: src/client/main.cc src/server/main.cc
-	$(Compiler) $(CompilerFlags) -o $@ $<
-
-$(Select): %: %.cc
+select: %: src/client/main.cc src/server/main.cc
 	echo "select unimplemented."
 
-$(Epoll): %: %.cc
+epoll: %: src/client/main.cc src/server/main.cc
 	echo "epoll unimplemented."
 
-$(URing): %: %.c
+uring: %: src/client/main.cc src/server/main.cc
 	echo "io-uring unimplemented."
 
+all: $(outs)
+
 clean:
-	rm -f $(Poll) $(Select) $(EPoll) $(URing)
+	rm -rf bin
