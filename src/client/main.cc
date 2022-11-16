@@ -1,6 +1,5 @@
 #include <arpa/inet.h>
 #include <errno.h>
-#include <liburing.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -11,14 +10,18 @@
 #include <iostream>
 #include <string_view>
 
-namespace client_lib
+#include "liburing.h"
+
+namespace client
 {
+
 void connect(std::string_view server_addr)
 {
 }
-}  // namespace client_lib
+
+}  // namespace client
 
 int main()
 {
-  std::cout << "hello from client_lib" << std::endl;
+  std::cout << "hello from client_lib. I do nothing." << std::endl;
 }

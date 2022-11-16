@@ -1,8 +1,0 @@
-git clone https://github.com/axboe/liburing.git
-cd liburing
-LLVMHome = /home/linuxbrew/.linuxbrew/Cellar/llvm/15.0.3
-CC=$LLVMHome/clang
-CXX=$LLVMHome/clang++
-./configure
-make
-cd ..
