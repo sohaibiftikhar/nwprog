@@ -20,6 +20,17 @@ cc_binary(
     srcs = [
         "kernel_side_polling.cc",
     ],
-    # linkopts = ["-lpthread"],
     deps = ["@liburing"],
+)
+
+cc_binary(
+    name = "echo_server",
+    srcs = [
+        "echo_server.cc",
+    ],
+    deps = [
+        "//src/lib:log",
+        "//src/lib:scope_guard",
+        "@liburing",
+    ],
 )

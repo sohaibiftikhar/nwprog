@@ -1,3 +1,5 @@
 bin/
 liburing/
 bazel-*
+./compile_commands.json
+user.bazelrc
