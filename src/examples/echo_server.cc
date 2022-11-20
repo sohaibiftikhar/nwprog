@@ -6,10 +6,13 @@
 #include <sys/types.h>
 #include <unistd.h>
 
+#include <cstdint>
 #include <cstring>
+#include <deque>
 #include <iostream>
 #include <source_location>
 
+#include "src/io/uring.hh"
 #include "src/lib/log.hh"
 #include "src/lib/scope_guard.hh"
 
@@ -18,9 +21,9 @@ namespace
 
 namespace log = spinscale::nwprog::log;
 namespace lib = spinscale::nwprog::lib;
+namespace io = spinscale::nwprog::io;
 
-constexpr auto backlog = 512U;
-constexpr auto max_events = 128U;
+constexpr auto max_events = 1024U;
 constexpr auto max_message_size = 2048U;
 
 enum class IoMode : uint8_t
@@ -29,14 +32,14 @@ enum class IoMode : uint8_t
   io_uring
 };
 
-using EpollEvent = struct epoll_event;
-
+using Event = struct epoll_event;
+// epoll specific stuff.
+namespace epoll
+{
 int setup_epoll(int listen_fd)
 {
-  EpollEvent ev;
+  Event ev;
   int epollfd = epoll_create(max_events);
-  ;
-
   log::expects(epollfd >= 0, "Error creating epoll fd.");
   ev.events = EPOLLIN;
   ev.data.fd = listen_fd;
@@ -56,7 +59,7 @@ void handle_new_connection(int listen_fd, int epollfd)
   log::expects(sock_conn_fd >= 0, "Error accepting new connection.");
 
   // 1. register the connected socket to epoll.
-  static EpollEvent event;
+  static Event event;
   event.events = EPOLLIN | EPOLLET;
   event.data.fd = sock_conn_fd;
   log::expects(epoll_ctl(epollfd, EPOLL_CTL_ADD, sock_conn_fd, &event) == 0, "Error adding new event to epoll.");
@@ -89,7 +92,7 @@ void run_event_loop(const int listen_fd, const int epollfd)
   char buffer[max_message_size];
   memset(buffer, 0, sizeof(buffer));
   // Preallocated event array for handling for the epoll_wait.
-  EpollEvent events[max_events];
+  Event events[max_events];
   while (1)
   {
     // maybe new events otherwise -1 on error.
@@ -112,6 +115,7 @@ void run_event_loop(const int listen_fd, const int epollfd)
     }
   }
 }
+}  // namespace epoll
 
 /// Common TCP socket setup for the server side.
 int setup_server_socket(int portno)
@@ -133,7 +137,7 @@ int setup_server_socket(int portno)
   // bind socket and listen for connections
   log::expects(
     bind(sock_listen_fd, (struct sockaddr*)&server_addr, sizeof(server_addr)) >= 0, "Error binding to socket.");
-  log::expects(listen(sock_listen_fd, backlog) >= 0, "Error listening!");
+  log::expects(listen(sock_listen_fd, max_events) >= 0, "Error listening!");
   log::info("echo server listening for connections.");
   return sock_listen_fd;
 }
@@ -153,21 +157,134 @@ IoMode get_mode(const char* mode)
   __builtin_unreachable();
 }
 
+namespace uring
+{
+
+enum class RequestType
+{
+  accept,
+  read,
+  write
+};
+
+union IORequest
+{
+  struct
+  {
+    RequestType type : 8;
+    uint16_t fd;
+    uint32_t client_id;
+  } unpacked;
+  uint64_t packed;
+};
+
+struct CompletionCb
+{
+  static_assert(sizeof(IORequest) <= sizeof(void*));
+
+  void operator()(void* user_data, int32_t result)
+  {
+    IORequest request = {.packed = (uint64_t)user_data};
+    switch (request.unpacked.type)
+    {
+      case RequestType::accept:
+      {
+        log::expects(result != -1, "accept operation failed.");
+        // A: prepare for a new acceptance.
+        {
+          IORequest next_accept{.unpacked{.type = RequestType::accept, .client_id = num_clients}};
+          ring.prepare_accept(listen_fd, (struct sockaddr*)&client_addr, &socklen, (void*)next_accept.packed);
+        }
+        // B: start reads after accept.
+        {
+          auto& buffer = read_buffers.emplace_back();
+          IORequest next_read = {
+            .unpacked{.type = RequestType::read, .fd = static_cast<uint16_t>(result), .client_id = num_clients}};
+          // on successful accept the result points to the sock_conn_fd.
+          ring.prepare_read(result, buffer, max_message_size, 0, (void*)next_read.packed);
+        }
+        ++num_clients;
+        break;
+      }
+      case RequestType::read:
+      {
+        log::expects(result != -1, "read operation failed.");
+        if (result > 0)
+        {  // start writes after accept.
+          IORequest next = {
+            .unpacked{.type = RequestType::write, .fd = request.unpacked.fd, .client_id = request.unpacked.client_id}};
+          // on successful read the result points to number of bytes read.
+          ring.prepare_write(request.unpacked.fd, read_buffers[next.unpacked.client_id], result, 0, (void*)next.packed);
+        }
+        else
+        {
+          shutdown(request.unpacked.fd, SHUT_RDWR);
+        }
+        break;
+      }
+      case RequestType::write:
+      {
+        log::expects(result != -1, "write operation failed.");
+        // prepare to read again.
+        {
+          IORequest next_read = {
+            .unpacked{.type = RequestType::read, .fd = request.unpacked.fd, .client_id = request.unpacked.client_id}};
+          // on successful read the result points to number of bytes read.
+          ring.prepare_read(
+            request.unpacked.fd, read_buffers[request.unpacked.client_id], max_message_size, 0,
+            (void*)next_read.packed);
+        }
+        // TODO: we should clean up stuff based on result == 0 here.
+        break;
+      }
+    }
+  }
+
+  const int listen_fd;
+  io::Uring& ring;
+
+  /// Internal members.
+  std::deque<char[max_message_size]> read_buffers{max_events};
+  uint32_t num_clients = 0U;
+  bool ready_to_stop{false};
+  // we cannot have two simultaneous accepts in progress so having a single client_addr is fine here.
+  struct sockaddr_in client_addr;
+  socklen_t socklen = sizeof(client_addr);
+};
+
+void run_event_loop(const int listen_fd, io::Uring& ring)
+{
+  CompletionCb completion_cb{listen_fd, ring};
+  {  // kick off the first accept.
+    IORequest next_accept = {.unpacked{.type = RequestType::accept, .client_id = 0}};
+    ring.prepare_accept(
+      listen_fd, (struct sockaddr*)&completion_cb.client_addr, &completion_cb.socklen, (void*)next_accept.packed);
+    ring.submit();
+  }
+  while (true)
+  {
+    ring.for_every_completion(completion_cb);
+    ring.submit();
+  };
+}
+
+}  // namespace uring
+
 }  // namespace
 
 int main(int argc, char* argv[])
 {
   if (argc < 3)
   {
-    std::cerr << "Please give a port number and mode: ./epoll_echo_server [port] [mode]\n";
+    log::error("Please give a port number and mode: ./epoll_echo_server [port] [mode]");
     exit(0);
   }
 
   const auto mode = get_mode(argv[2]);
 
   // setup socket
-  int portno = ::strtol(argv[1], NULL, 10);
-  int sock_listen_fd = setup_server_socket(portno);
+  const int portno = ::strtol(argv[1], NULL, 10);
+  const int sock_listen_fd = setup_server_socket(portno);
   // iofd passed down to close in the shutdown. this multiplexes as fd for both epoll and otherwise.
   int iofd;
 
@@ -183,14 +300,16 @@ int main(int argc, char* argv[])
   {
     case IoMode::epoll:
     {
-      const int epollfd = setup_epoll(sock_listen_fd);
+      const int epollfd = epoll::setup_epoll(sock_listen_fd);
       iofd = epollfd;
-      run_event_loop(sock_listen_fd, epollfd);
+      epoll::run_event_loop(sock_listen_fd, epollfd);
       break;
     }
     case IoMode::io_uring:
     {
-      log::error("mode io_uring is not supported yet.");
+      io::Uring ring(max_events, {/* io::UringFeature::sq_polling */});
+      // io::Uring ring(max_events, {io::UringFeature::sq_polling});
+      uring::run_event_loop(sock_listen_fd, ring);
       break;
     }
   }

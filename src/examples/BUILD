@@ -29,8 +29,8 @@ cc_binary(
         "echo_server.cc",
     ],
     deps = [
+        "//src/io:uring",
         "//src/lib:log",
         "//src/lib:scope_guard",
-        "@liburing",
     ],
 )

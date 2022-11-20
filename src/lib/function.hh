@@ -1,4 +1,5 @@
 #include <concepts>
+#include <iostream>
 #include <utility>
 
 namespace spinscale::nwprog::lib
@@ -13,25 +14,28 @@ template <class R, class... Args>
 class FnRef<R(Args...)>
 {
   /// This is a non owning type so storage is a pointer to a function.
-  using Storage = R (*)(Args...);
+  using FnPtr = R (*)(void*, Args...);
+  using Storage = void*;
 
 public:
   /// Constructor from ref and const ref.
   template <class Callable>
     requires(std::invocable<Callable, Args...>)
-  FnRef(const Callable& callable) : storage_(callable){};
-  template <class Callable>
-    requires(std::invocable<Callable, Args...>)
-  FnRef(Callable& callable) : storage_(callable){};
+  FnRef(Callable& callable) : storage_(&callable)
+  {
+    static constexpr auto invoke = [](Storage storage, Args... args) { (*static_cast<Callable*>(storage))(args...); };
+    invoke_ = invoke;
+  };
 
   /// Invoke the function.
-  R operator()(Args&&... args) const
+  R operator()(Args... args) const
   {
-    return storage_(std::forward<Args>(args)...);
+    return invoke_(storage_, std::forward<Args>(args)...);
   }
 
 private:
-  Storage storage_;
+  FnPtr invoke_;
+  void* storage_;
 };
 
 }  // namespace spinscale::nwprog::lib
