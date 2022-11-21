@@ -24,6 +24,7 @@ namespace lib = spinscale::nwprog::lib;
 namespace io = spinscale::nwprog::io;
 
 constexpr auto max_events = 1024U;
+constexpr auto ring_size = max_events * 2;
 constexpr auto max_message_size = 2048U;
 
 enum class IoMode : uint8_t
@@ -307,7 +308,7 @@ int main(int argc, char* argv[])
     }
     case IoMode::io_uring:
     {
-      io::Uring ring(max_events, {/* io::UringFeature::sq_polling */});
+      io::Uring ring(ring_size, {});
       // io::Uring ring(max_events, {io::UringFeature::sq_polling});
       uring::run_event_loop(sock_listen_fd, ring);
       break;
